@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "io.github.devendergarg.twa",
+      "sha256_cert_fingerprints": [
+        "28:43:10:1F:A5:CF:AC:1C:20:C2:FB:3F:2C:F5:90:FE:2C:F2:62:AC:77:D3:6C:77:54:B3:12:5C:90:3B:09:40"
+      ]
+    }
+  }
+]
