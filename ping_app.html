@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>URL Pinger</title>
+    <link rel="manifest" href="manifest.json"> <!-- Added manifest link -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles */
+        body {
+            background: linear-gradient(to bottom right, #6b21a8, #d97706); /* Purple to Orange gradient */
+            font-family: sans-serif;
+        }
+        .status-dot {
+            width: 0.75rem; /* 12px */
+            height: 0.75rem; /* 12px */
+            border-radius: 50%;
+            display: inline-block;
+            flex-shrink: 0; /* Prevent shrinking in flex container */
+            margin-top: 4px; /* Align better with text */
+        }
+        .status-ok { background-color: #22c55e; } /* green-500 */
+        .status-error { background-color: #ef4444; } /* red-500 */
+        .status-pending { background-color: #9ca3af; } /* gray-400 */
+        .status-checking { background-color: #3b82f6; } /* blue-500 */
+
+        /* Loading spinner */
+        .loader {
+            border: 2px solid #f3f3f3; /* Light grey */
+            border-top: 2px solid #6b21a8; /* Purple */
+            border-radius: 50%;
+            width: 12px;
+            height: 12px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-top: 4px; /* Align better with text */
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* History Bar Styles */
+        .history-bar {
+            display: flex;
+            height: 10px; /* Height of the history bar */
+            overflow: hidden; /* Hide overflow if too many items */
+            flex-direction: row-reverse; /* Newest items first (right to left) */
+        }
+        .history-point {
+            width: 3px; /* Width of each point */
+            height: 100%;
+            margin-left: 1px; /* Spacing between points */
+            flex-shrink: 0; /* Prevent shrinking */
+        }
+        .history-ok { background-color: #22c55e; } /* green-500 */
+        .history-error { background-color: #ef4444; } /* red-500 */
+        .history-pending { background-color: #e5e7eb; } /* gray-200 (placeholder) */
+
+    </style>
+</head>
+<body class="pt-10 pb-10">
+
+    <div id="app" class="max-w-2xl mx-auto bg-white rounded-lg shadow-xl p-6">
+        <h1 class="text-2xl font-bold text-center text-gray-800 mb-6">URL Pinger</h1>
+
+        <div class="mb-4">
+            <label for="urlInput" class="block text-sm font-medium text-gray-700 mb-1">Add URL to Monitor:</label>
+            <div class="flex space-x-2">
+                <input type="url" id="urlInput" placeholder="https://example.com" class="flex-grow p-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent" required>
+                <button id="addUrlBtn" class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded transition duration-150 ease-in-out">
+                    Add
+                </button>
+            </div>
+            <p id="errorMsg" class="text-red-500 text-sm mt-1 h-4"></p> <!-- Error message area -->
+        </div>
+
+        <div class="mt-6">
+            <h2 class="text-lg font-semibold text-gray-700 mb-2">Monitored URLs</h2>
+            <div id="urlList" class="space-y-4">
+                <!-- URL items will be injected here -->
+                 <p class="text-gray-500 italic">No URLs added yet.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const urlInput = document.getElementById('urlInput');
+        const addUrlBtn = document.getElementById('addUrlBtn');
+        const urlList = document.getElementById('urlList');
+        const errorMsg = document.getElementById('errorMsg');
+
+        // { id: number, url: string, status: 'pending'|'ok'|'error'|'checking', ip: string, responseTime: number|null, lastChecked: string|null, intervalId: number|null, isChecking: boolean, history: Array<{timestamp: number, status: 'ok'|'error'}> }
+        let monitoredUrls = [];
+        let nextId = 0;
+
+        const PING_INTERVAL_MS = 60 * 1000; // 1 minute
+        const HISTORY_DURATION_MS = 60 * 60 * 1000; // 60 minutes
+
+        // --- Local Storage ---
+        function loadUrlsFromStorage() {
+            const storedUrls = localStorage.getItem('monitoredUrls');
+            if (storedUrls) {
+                const loadedData = JSON.parse(storedUrls);
+                 // Find the highest existing ID to avoid collisions
+                 nextId = loadedData.reduce((maxId, url) => Math.max(maxId, url.id), -1) + 1;
+                 // Reset transient state on load
+                monitoredUrls = loadedData.map(url => ({
+                    ...url,
+                    status: 'pending', // Start as pending
+                    intervalId: null,
+                    isChecking: false,
+                    lastChecked: null,
+                    responseTime: null,
+                    history: [] // History is not stored, rebuilt on checks
+                }));
+                renderUrlList();
+                startAllChecks(); // Start checking loaded URLs
+            }
+        }
+
+        function saveUrlsToStorage() {
+            // Don't save intervalId, isChecking, or history in storage
+            const urlsToSave = monitoredUrls.map(({ intervalId, isChecking, history, ...rest }) => rest);
+            localStorage.setItem('monitoredUrls', JSON.stringify(urlsToSave));
+        }
+
+
+        // --- IP Address Lookup ---
+        async function getIpAddress(hostname) {
+            try {
+                 // Using a public DNS-over-HTTPS service
+                const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=A`, {
+                    headers: { 'accept': 'application/dns-json' },
+                });
+                if (!response.ok) return 'N/A';
+                const data = await response.json();
+                if (data.Answer && data.Answer.length > 0) {
+                    // Return the first A record found
+                    return data.Answer.find(ans => ans.type === 1)?.data || 'N/A';
+                }
+                return 'N/A'; // No A record found
+            } catch (error) {
+                console.error(`Error fetching IP for ${hostname}:`, error);
+                return 'N/A'; // Network error or other issue
+            }
+        }
+
+        // --- URL Checking Logic ---
+         function pruneHistory(urlData) {
+            const cutoff = Date.now() - HISTORY_DURATION_MS;
+            urlData.history = urlData.history.filter(entry => entry.timestamp >= cutoff);
+        }
+
+        async function checkUrlStatus(urlData) {
+            if (urlData.isChecking) return; // Prevent concurrent checks for the same URL
+
+            urlData.isChecking = true;
+            urlData.status = 'checking';
+            renderUrlList(); // Update UI immediately to show 'checking'
+
+            const startTime = performance.now();
+            let checkStatus = 'error'; // Default to error
+            let responseTime = null;
+
+            try {
+                // Use 'no-cors' to check reachability without full CORS compliance.
+                // Cannot read response body or actual status code, but success means server responded.
+                // HEAD is lighter, but some servers block it. Fallback might be needed (but complicates 'no-cors').
+                 await fetch(urlData.url, {
+                    method: 'HEAD', // Try HEAD first
+                    mode: 'no-cors',
+                    signal: AbortSignal.timeout(15000) // 15 second timeout
+                 });
+                // If the fetch promise resolves (even with opaque response), consider it 'ok' for reachability.
+                checkStatus = 'ok';
+                responseTime = Math.round(performance.now() - startTime);
+            } catch (error) {
+                 // Errors: Network error, DNS resolution failure, timeout, potentially CORS issues if 'no-cors' isn't enough
+                 console.warn(`Check failed for ${urlData.url}:`, error.name, error.message);
+                 checkStatus = 'error';
+                 responseTime = null; // No valid response time on error
+                 // Optional: Could try a GET request as fallback here if HEAD fails specifically due to method not allowed,
+                 // but that adds complexity. For now, any fetch error is treated as 'error'.
+            } finally {
+                 urlData.status = checkStatus;
+                 urlData.responseTime = responseTime;
+                 urlData.lastChecked = new Date().toLocaleString();
+                 urlData.isChecking = false;
+
+                 // Add to history and prune old entries
+                 urlData.history.push({ timestamp: Date.now(), status: checkStatus });
+                 pruneHistory(urlData); // Remove entries older than HISTORY_DURATION_MS
+
+                 renderUrlList(); // Update UI with final status and history
+                 saveUrlsToStorage(); // Save updated status (excluding history)
+            }
+        }
+
+        // --- Uptime Calculation ---
+        function calculateUptime(history) {
+            const relevantHistory = history.filter(entry => entry.timestamp >= Date.now() - HISTORY_DURATION_MS);
+            if (relevantHistory.length === 0) {
+                return { percentage: 'N/A', points: [] }; // No data in the window
+            }
+
+            const okCount = relevantHistory.filter(entry => entry.status === 'ok').length;
+            const percentage = Math.round((okCount / relevantHistory.length) * 100);
+
+            // Prepare history points for rendering (limit to a reasonable number, e.g., 60 for 60 mins)
+            const points = relevantHistory
+                .slice(-60) // Show up to the last 60 checks visually
+                .map(entry => entry.status); // Extract just the status for rendering
+
+            return { percentage: `${percentage}%`, points: points };
+        }
+
+
+        // --- UI Rendering ---
+        function renderUrlList() {
+            urlList.innerHTML = ''; // Clear existing list
+
+            if (monitoredUrls.length === 0) {
+                urlList.innerHTML = '<p class="text-gray-500 italic">No URLs added yet.</p>';
+                return;
+            }
+
+            monitoredUrls.forEach(urlData => {
+                const item = document.createElement('div');
+                item.className = 'border-b border-gray-200 pb-4'; // Add padding bottom for spacing
+                item.dataset.id = urlData.id;
+
+                let statusIndicator;
+                if (urlData.isChecking) {
+                    statusIndicator = '<span class="loader" title="Checking..."></span>';
+                } else {
+                    const statusClass = urlData.status === 'ok' ? 'status-ok' : (urlData.status === 'error' ? 'status-error' : 'status-pending');
+                    const statusTitle = urlData.status === 'ok' ? 'Reachable' : (urlData.status === 'error' ? 'Error/Unreachable' : 'Pending Check');
+                    statusIndicator = `<span class="status-dot ${statusClass}" title="${statusTitle}"></span>`;
+                }
+
+                const responseTimeText = urlData.responseTime !== null ? `${urlData.responseTime} ms` : 'N/A';
+                const lastCheckedText = urlData.lastChecked ? `Last check: ${urlData.lastChecked}` : 'Not checked yet';
+                const { percentage: uptimePercentage, points: historyPoints } = calculateUptime(urlData.history);
+
+                // Generate History Bar HTML
+                let historyBarHtml = '<div class="history-bar mt-1" title="History (Last 60 mins, newest right)">';
+                // Fill with placeholders if fewer than 60 points for consistent width
+                const placeholdersNeeded = Math.max(0, 60 - historyPoints.length);
+                for(let i = 0; i < placeholdersNeeded; i++) {
+                     historyBarHtml += `<div class="history-point history-pending"></div>`;
+                }
+                historyPoints.forEach(status => {
+                    const historyClass = status === 'ok' ? 'history-ok' : 'history-error';
+                    historyBarHtml += `<div class="history-point ${historyClass}"></div>`;
+                });
+                 historyBarHtml += '</div>';
+
+
+                item.innerHTML = `
+                    <div class="flex items-start justify-between space-x-3">
+                        <div class="flex items-start space-x-3 flex-grow min-w-0">
+                            ${statusIndicator}
+                            <div class="min-w-0">
+                                <p class="text-gray-800 font-medium truncate" title="${urlData.url}">${urlData.url}</p>
+                                <p class="text-sm text-gray-600">
+                                    IP: ${urlData.ip || 'N/A'} | Resp. Time: ${responseTimeText} | Uptime (60m): ${uptimePercentage}
+                                </p>
+                                 <p class="text-xs text-gray-500 mt-0.5">${lastCheckedText}</p>
+                            </div>
+                        </div>
+                        <button class="removeUrlBtn flex-shrink-0 bg-gray-200 hover:bg-red-500 hover:text-white text-gray-600 text-xs font-bold py-1 px-2 rounded transition duration-150 ease-in-out mt-1" title="Stop Monitoring">
+                            Remove
+                        </button>
+                    </div>
+                    ${historyBarHtml}
+                `;
+
+                item.querySelector('.removeUrlBtn').addEventListener('click', () => removeUrl(urlData.id));
+                urlList.appendChild(item);
+            });
+        }
+
+
+        // --- Event Handlers & Logic ---
+        async function addUrl() {
+            let urlValue = urlInput.value.trim();
+            errorMsg.textContent = ''; // Clear previous errors
+
+            if (!urlValue) {
+                errorMsg.textContent = 'Please enter a URL.';
+                return;
+            }
+
+            // Basic protocol addition
+            if (!urlValue.startsWith('http://') && !urlValue.startsWith('https://')) {
+                urlValue = 'https://' + urlValue; // Default to https
+            }
+
+            // Validate URL format
+            try {
+                new URL(urlValue); // This constructor validates the URL structure
+            } catch (_) {
+                errorMsg.textContent = 'Invalid URL format.';
+                return;
+            }
+
+            // Check for duplicates
+            if (monitoredUrls.some(url => url.url === urlValue)) {
+                 errorMsg.textContent = 'This URL is already being monitored.';
+                 return;
+            }
+
+             // Show temporary adding state
+            addUrlBtn.disabled = true;
+            addUrlBtn.textContent = 'Adding...';
+            urlInput.disabled = true;
+
+            let hostname = 'N/A';
+            let ip = 'N/A';
+             try {
+                 hostname = new URL(urlValue).hostname;
+                 // Get IP address *after* validation and before adding to list
+                 ip = await getIpAddress(hostname);
+             } catch (e) {
+                 console.error("Error parsing hostname during add:", e);
+                 // Keep hostname/IP as N/A
+             }
+
+
+            const newUrlData = {
+                id: nextId++,
+                url: urlValue,
+                status: 'pending', // Start as pending
+                ip: ip,
+                responseTime: null,
+                lastChecked: null,
+                intervalId: null,
+                isChecking: false,
+                history: [] // Initialize empty history
+            };
+
+            monitoredUrls.push(newUrlData);
+            saveUrlsToStorage(); // Save immediately after adding structural info
+            renderUrlList(); // Add to list visually
+            startCheckingUrl(newUrlData); // Start the check cycle (will update status and save again)
+
+            urlInput.value = ''; // Clear input field
+            addUrlBtn.disabled = false;
+            urlInput.disabled = false;
+            addUrlBtn.textContent = 'Add';
+        }
+
+        function removeUrl(id) {
+            const index = monitoredUrls.findIndex(url => url.id === id);
+            if (index > -1) {
+                const urlData = monitoredUrls[index];
+                if (urlData.intervalId) {
+                    clearInterval(urlData.intervalId); // Stop the check interval
+                }
+                monitoredUrls.splice(index, 1);
+                renderUrlList(); // Update UI
+                saveUrlsToStorage(); // Persist removal
+            }
+        }
+
+        function startCheckingUrl(urlData) {
+             // Initial check immediately after adding or loading
+            checkUrlStatus(urlData); // Don't wait for the first interval
+
+            // Then set interval for subsequent checks
+            // Clear any existing interval first (important for reload/re-init)
+            if (urlData.intervalId) clearInterval(urlData.intervalId);
+
+            urlData.intervalId = setInterval(() => {
+                checkUrlStatus(urlData);
+            }, PING_INTERVAL_MS);
+        }
+
+        function startAllChecks() {
+             monitoredUrls.forEach(urlData => {
+                 // Only start if interval isn't already somehow set (safety check)
+                 if (!urlData.intervalId) {
+                     startCheckingUrl(urlData);
+                 }
+             });
+        }
+
+        // --- Initialization ---
+        addUrlBtn.addEventListener('click', addUrl);
+        urlInput.addEventListener('keypress', (event) => {
+            if (event.key === 'Enter') {
+                 event.preventDefault(); // Prevent potential form submission if wrapped in form
+                addUrl();
+            }
+        });
+
+        // Load existing URLs from storage on page load
+        document.addEventListener('DOMContentLoaded', loadUrlsFromStorage);
+
+    </script>
+
+    <!-- Service Worker Registration Script -->
+    <script>
+        if ('serviceWorker' in navigator) {
+          window.addEventListener('load', () => {
+            // Adjust path if needed - assuming service-worker.js is at the root
+            navigator.serviceWorker.register('/service-worker.js')
+              .then(registration => {
+                console.log('ServiceWorker registration successful with scope: ', registration.scope);
+              })
+              .catch(error => {
+                console.log('ServiceWorker registration failed: ', error);
+              });
+          });
+        }
+    </script>
+    <!-- End Service Worker Registration Script -->
+
+</body>
+</html>

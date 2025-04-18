@@ -1,0 +1,10 @@
+```json
+{
+  "short_name": "Pinger",
+  "name": "URL Pinger",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#d97706",
+  "theme_color": "#6b21a8"
+}
+```
