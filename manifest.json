@@ -1,7 +1,7 @@
 {
   "short_name": "Pinger",
   "name": "Pinger",
-  "id": "/index.html",
+  "id": "/Pinger/",
   "description": "Pinger for URLs",
   "lang": "en",
   "orientation": "natural",
@@ -12,8 +12,8 @@
     "window-controls-overlay"
   ],
   "dir": "auto",
-  "scope": "/",
-  "start_url": "/Pinger",
+  "scope": "/Pinger/",
+  "start_url": "/Pinger/index.html",
   "theme_color": "#000000",
   "background_color": "#000000",
   "icons": [
